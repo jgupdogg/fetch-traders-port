@@ -1,12 +1,14 @@
 {
-    "Version": "2012-10-17",
-    "Statement": [
-      {
-        "Effect": "Allow",
-        "Principal": {
-          "Service": "lambda.amazonaws.com"
-        },
-        "Action": "sts:AssumeRole"
+    "Sid": "apigateway-post-root",
+    "Effect": "Allow",
+    "Principal": {
+      "Service": "apigateway.amazonaws.com"
+    },
+    "Action": "lambda:InvokeFunction",
+    "Condition": {
+      "ArnLike": {
+        "AWS:SourceArn": "arn:aws:execute-api:us-east-1:183295431558:7w8mvs9mhh/*/POST/"
       }
-    ]
-}
+    }
+  }
+  
