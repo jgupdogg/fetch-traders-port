@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+*.swo
+
+# Environment variables
+.env
+env.json
+
+# Docker
+**/Dockerfile
+**/docker-compose.yml
+
+# Logs
+*.log
+
+# AWS credentials
+~/.aws/credentials
+~/.aws/config
