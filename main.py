@@ -5,119 +5,108 @@ import json
 import logging
 import base64
 from snowflake.snowpark import Session
-from datetime import datetime
-from dateutil import tz
+
+# Import utility functions
+from utils.snowflake import (
+    get_max_fetch_date,
+    get_trader_portfolio_agg,
+    get_addresses,
+    get_top_addresses_by_frequency,
+    get_trader_details,
+    create_snowflake_session
+)
+from utils.birdseye import (
+    initialize_birdseye_sdk,
+    get_token_data
+)
 
 # Configure logging
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-def create_snowflake_session():
-    """
-    Establishes and returns a Snowflake Snowpark Session using environment variables.
-    """
-    try:
-        # Retrieve environment variables
-        SNOWFLAKE_ACCOUNT = os.getenv('SNOWFLAKE_ACCOUNT')
-        SNOWFLAKE_REGION = os.getenv('SNOWFLAKE_REGION')
-        SNOWFLAKE_USER = os.getenv('SNOWFLAKE_USER')
-        SNOWFLAKE_PASSWORD = os.getenv('SNOWFLAKE_PASSWORD')
-        SNOWFLAKE_ROLE = os.getenv('SNOWFLAKE_ROLE')
-        SNOWFLAKE_WAREHOUSE = os.getenv('SNOWFLAKE_WAREHOUSE')
-        SNOWFLAKE_DATABASE = os.getenv('SNOWFLAKE_DATABASE')
-        SNOWFLAKE_SCHEMA = os.getenv('SNOWFLAKE_SCHEMA')
-
-        # Validate that all required environment variables are present
-        required_vars = {
-            'SNOWFLAKE_ACCOUNT': SNOWFLAKE_ACCOUNT,
-            'SNOWFLAKE_REGION': SNOWFLAKE_REGION,
-            'SNOWFLAKE_USER': SNOWFLAKE_USER,
-            'SNOWFLAKE_PASSWORD': SNOWFLAKE_PASSWORD,
-            'SNOWFLAKE_ROLE': SNOWFLAKE_ROLE,
-            'SNOWFLAKE_WAREHOUSE': SNOWFLAKE_WAREHOUSE,
-            'SNOWFLAKE_DATABASE': SNOWFLAKE_DATABASE,
-            'SNOWFLAKE_SCHEMA': SNOWFLAKE_SCHEMA,
-        }
-
-        missing_vars = [key for key, value in required_vars.items() if not value]
-        if missing_vars:
-            logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-            raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
-
-        # Construct the full account identifier
-        full_account = f"{SNOWFLAKE_ACCOUNT}.{SNOWFLAKE_REGION}"
-        logger.info(f"Full Snowflake account identifier: {full_account}")
-
-        # Define connection parameters
-        connection_parameters = {
-            "account": full_account,
-            "user": SNOWFLAKE_USER,
-            "password": SNOWFLAKE_PASSWORD,
-            "role": SNOWFLAKE_ROLE,
-            "warehouse": SNOWFLAKE_WAREHOUSE,
-            "database": SNOWFLAKE_DATABASE,
-            "schema": SNOWFLAKE_SCHEMA,
-        }
-
-        # Log non-sensitive connection parameters
-        logger.info(f"Connection parameters: account={connection_parameters['account']}, user={connection_parameters['user']}, role={connection_parameters['role']}, warehouse={connection_parameters['warehouse']}, database={connection_parameters['database']}, schema={connection_parameters['schema']}")
-
-        # Establish a Snowflake session
-        logger.info("Establishing Snowflake session...")
-        snowflake_session = Session.builder.configs(connection_parameters).create()
-        logger.info("Connection to Snowflake successful!")
-        return snowflake_session
-
-    except Exception as e:
-        logger.error(f"Failed to connect to Snowflake: {str(e)}")
-        raise
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(logging.DEBUG)
 
 def lambda_handler(event, context):
-    # Define CORS headers
-    cors_headers = {
-        "Access-Control-Allow-Origin": "*",  
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
-        "Content-Type": "application/json",
-    }
-
-    # Log the event
-    logger.info(f"Event received: {json.dumps(event)}")
-
-    # Extract the HTTP method from the event
-    method = event.get('httpMethod') or event.get('requestContext', {}).get('http', {}).get('method', 'POST')
-
-    # Handle OPTIONS method for CORS preflight
-    if method == 'OPTIONS':
-        return {
-            'statusCode': 200,
-            'headers': cors_headers,
-            'body': ''
-        }
-
-    # Ensure the request method is POST
-    if method != 'POST':
-        return {
-            'statusCode': 405,
-            'headers': cors_headers,
-            'body': json.dumps({'error': 'Method Not Allowed'})
-        }
-
+    """
+    AWS Lambda function handler to process API requests and return trader portfolio data,
+    along with token metadata and trade data. Includes proper CORS handling for browser-based requests.
+    """
     try:
+        # Log the event safely
+        logger.info("Event received: {}".format(json.dumps(event)))
+
+        # Define CORS headers
+        cors_headers = {
+            "Access-Control-Allow-Origin": "*",  # Update to specific origin in production
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
+            "Content-Type": "application/json",
+        }
+
+        # Extract the HTTP method from the event
+        method = event.get('httpMethod') or event.get('requestContext', {}).get('http', {}).get('method', 'POST').upper()
+        logger.info(f"HTTP Method: {method}")
+
+        # Handle OPTIONS method for CORS preflight
+        if method == 'OPTIONS':
+            logger.info("Handling CORS preflight request.")
+            return {
+                'statusCode': 200,
+                'headers': cors_headers,
+                'body': ''
+            }
+
+        # Ensure the request method is POST
+        if method != 'POST':
+            logger.warning(f"Method Not Allowed: {method}")
+            return {
+                'statusCode': 405,
+                'headers': cors_headers,
+                'body': json.dumps({'error': 'Method Not Allowed'})
+            }
+
         # Extract the JSON payload from the request
         body = event.get('body', '{}')
-        if event.get('isBase64Encoded', False):
+        is_base64_encoded = event.get('isBase64Encoded', False)
+        if is_base64_encoded:
             body = base64.b64decode(body).decode('utf-8')
-        payload = json.loads(body)
-        logger.info(f"Received payload: {json.dumps(payload)}")
+        logger.info(f"Raw body: {body}")
+
+        try:
+            payload = json.loads(body)
+            logger.info(f"Received payload: {json.dumps(payload)}")
+        except json.JSONDecodeError:
+            logger.error("Invalid JSON payload.")
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'error': 'Invalid JSON payload.'})
+            }
 
         # Extract 'category' from the payload
         category = payload.get('category')
         if not category:
+            logger.warning("Missing 'category' in request payload.")
             return {
                 'statusCode': 400,
                 'headers': cors_headers,
                 'body': json.dumps({'error': 'Missing "category" in request payload.'})
+            }
+
+        # Extract 'addresses' from the payload (if any)
+        # Renamed from 'address' to 'addresses' for clarity
+        addresses = payload.get('addresses', [])
+        if addresses and not isinstance(addresses, list):
+            logger.warning("'addresses' should be a list.")
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'error': '"addresses" should be a list.'})
             }
 
         # Create Snowflake session
@@ -131,49 +120,73 @@ def lambda_handler(event, context):
                 'body': json.dumps({'error': 'Failed to connect to data source.'})
             }
 
-        # Query the most recent FETCH_DATE for the given category
+        # Initialize BirdsEyeSDK
         try:
-            sql_fetch_date = f"""
-            SELECT MAX(FETCH_DATE) AS MAX_FETCH_DATE
-            FROM TRADER_PORTFOLIO_AGG
-            WHERE CATEGORY = '{category}'
-            """
-            logger.info(f"Executing query to fetch max FETCH_DATE for category '{category}'.")
-            result = session.sql(sql_fetch_date).collect()
-            max_fetch_date = result[0]['MAX_FETCH_DATE'] if result else None
+            birdseye_sdk = initialize_birdseye_sdk()
+        except EnvironmentError as e:
+            logger.error(str(e))
+            session.close()
+            return {
+                'statusCode': 500,
+                'headers': cors_headers,
+                'body': json.dumps({'error': 'Server configuration error.'})
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error initializing BirdsEyeSDK: {str(e)}", exc_info=True)
+            session.close()
+            return {
+                'statusCode': 500,
+                'headers': cors_headers,
+                'body': json.dumps({'error': 'Server configuration error.'})
+            }
 
+        # Initialize data dictionary to hold results
+        response_data = {}
+
+        try:
+            # Get the most recent FETCH_DATE for the category
+            max_fetch_date = get_max_fetch_date(session, category)
             if not max_fetch_date:
                 logger.info(f"No data found for category '{category}'.")
                 session.close()
                 return {
                     'statusCode': 200,
                     'headers': cors_headers,
-                    'body': json.dumps({'data': []})
+                    'body': json.dumps({'data': {}})
                 }
 
-            # Query data for the category and the most recent FETCH_DATE
-            sql_query = f"""
-            SELECT TOKEN, CATEGORY, TOTAL_VALUE_USD, TOTAL_BALANCE, TRADER_COUNT, FETCH_DATE
-            FROM TRADER_PORTFOLIO_AGG
-            WHERE CATEGORY = '{category}' AND FETCH_DATE = '{max_fetch_date}'
-            """
-            logger.info(f"Executing data retrieval query for category '{category}' and FETCH_DATE '{max_fetch_date}'.")
-            result = session.sql(sql_query).collect()
+            # Get Data1: All rows from TRADER_PORTFOLIO_AGG for the most recent date and category
+            data1 = get_trader_portfolio_agg(session, category, max_fetch_date)
+            response_data['data1'] = data1
 
-            # Prepare data
-            data = []
-            for row in result:
-                item = {
-                    'TOKEN': row['TOKEN'],
-                    'CATEGORY': row['CATEGORY'],
-                    'TOTAL_VALUE_USD': row['TOTAL_VALUE_USD'],
-                    'TOTAL_BALANCE': row['TOTAL_BALANCE'],
-                    'TRADER_COUNT': row['TRADER_COUNT'],
-                    'FETCH_DATE': row['FETCH_DATE'].isoformat() if isinstance(row['FETCH_DATE'], datetime) else row['FETCH_DATE']
-                }
-                data.append(item)
+            # Get Data2: List of trader addresses from TRADERS table for the category
+            data2 = get_addresses(session, category)
+            response_data['data2'] = data2
 
-            logger.info(f"Retrieved {len(data)} records for category '{category}'.")
+            # Get Data3: Trader details for a set of addresses
+            # If 'addresses' provided in payload, use them. Else, get top 5 addresses based on frequency from TRADERS
+            if not addresses:
+                addresses = get_top_addresses_by_frequency(session, category, top_n=5)
+            data3 = get_trader_details(session, addresses)
+            response_data['data3'] = data3
+
+            # Now, get the list of token addresses from data1
+            token_addresses = set()
+
+            # From data1
+            for item in data1:
+                if 'TOKEN_ADDRESS' in item and item['TOKEN_ADDRESS']:
+                    token_addresses.add(item['TOKEN_ADDRESS'])
+
+            # If token addresses are available from other sources, add them here
+            # Currently, data3 does not provide 'TOKEN_ADDRESSES', so we skip it
+
+            token_addresses = list(token_addresses)
+            logger.info(f"Total token addresses collected: {len(token_addresses)}")
+
+            # Use the SDK to fetch token metadata and trade data
+            token_data = get_token_data(birdseye_sdk, token_addresses)
+            response_data['token_data'] = token_data
 
             # Close the session
             session.close()
@@ -181,11 +194,11 @@ def lambda_handler(event, context):
             return {
                 'statusCode': 200,
                 'headers': cors_headers,
-                'body': json.dumps({'data': data})
+                'body': json.dumps({'data': response_data})
             }
 
         except Exception as e:
-            logger.error(f"Error querying data: {str(e)}")
+            logger.error(f"Error querying data: {str(e)}", exc_info=True)
             session.close()
             return {
                 'statusCode': 500,
@@ -193,15 +206,8 @@ def lambda_handler(event, context):
                 'body': json.dumps({'error': 'Error querying data.'})
             }
 
-    except json.JSONDecodeError:
-        logger.error("Invalid JSON payload.")
-        return {
-            'statusCode': 400,
-            'headers': cors_headers,
-            'body': json.dumps({'error': 'Invalid JSON payload.'})
-        }
     except Exception as e:
-        logger.error(f"An error occurred: {str(e)}")
+        logger.error(f"An unexpected error occurred: {str(e)}", exc_info=True)
         return {
             'statusCode': 500,
             'headers': cors_headers,

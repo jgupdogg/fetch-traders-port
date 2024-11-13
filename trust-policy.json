@@ -1,14 +1,13 @@
 {
-    "Sid": "apigateway-post-root",
-    "Effect": "Allow",
-    "Principal": {
-      "Service": "apigateway.amazonaws.com"
-    },
-    "Action": "lambda:InvokeFunction",
-    "Condition": {
-      "ArnLike": {
-        "AWS:SourceArn": "arn:aws:execute-api:us-east-1:183295431558:7w8mvs9mhh/*/POST/"
-      }
+  "Sid": "apigateway-post-root",
+  "Effect": "Allow",
+  "Principal": {
+    "Service": "apigateway.amazonaws.com"
+  },
+  "Action": "lambda:InvokeFunction",
+  "Condition": {
+    "ArnLike": {
+      "AWS:SourceArn": "arn:aws:execute-api:us-east-1:183295431558:7w8mvs9mhh/*/POST/"
     }
   }
-  
+}
