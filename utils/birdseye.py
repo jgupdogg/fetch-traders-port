@@ -36,23 +36,23 @@ def batch_addresses(addresses: List[str], batch_size: int = 0) -> List[List[str]
     """
     return [addresses[i:i + batch_size] for i in range(0, len(addresses), batch_size)]
 
-def get_token_data(sdk: BirdsEyeSDK, token_addresses: List[str]) -> dict:
+def get_price_data(sdk: BirdsEyeSDK, token_addresses: List[str]) -> dict:
     """
-    Fetches token metadata and price/volume data for a list of token addresses using the BirdsEyeSDK.
-    Returns a dictionary mapping token addresses to their respective data.
+    Fetches price data for a list of token addresses using the BirdsEyeSDK.
+    Returns a dictionary mapping token addresses to their respective price data.
     """
     try:
-        logger.info(f"Fetching token data for {len(token_addresses)} token addresses.")
-        token_data = {}
+        logger.info(f"Fetching price data for {len(token_addresses)} token addresses.")
+        price_data = {}
         if not token_addresses:
-            logger.info("No token addresses provided for fetching token data.")
-            return token_data
+            logger.info("No token addresses provided for fetching price data.")
+            return price_data
 
         # Remove duplicates and clean addresses
         unique_addresses = list(set(address.strip() for address in token_addresses if address.strip()))
         logger.info(f"Total unique token addresses to fetch: {len(unique_addresses)}")
 
-        # Batch addresses into groups of 10
+        # Batch addresses into groups of 100
         address_batches = batch_addresses(unique_addresses, batch_size=100)
         logger.info(f"Total batches to process: {len(address_batches)}")
 
@@ -63,30 +63,23 @@ def get_token_data(sdk: BirdsEyeSDK, token_addresses: List[str]) -> dict:
                 list_address = ','.join(batch)
                 logger.debug(f"List of addresses for API call: {list_address}")
 
-                # Fetch token metadata for the current batch
-                metadata_response = sdk.token.get_token_metadata_multiple(list_address)
-                metadata_dict = metadata_response.get('data', {})
-
                 # Fetch price and volume data for the current batch
                 price_volume_response = sdk.defi.get_price_volume_multi(list_address, type="24h")
                 price_volume_dict = price_volume_response.get('data', {})
 
-                # Combine metadata and price/volume data
+                # Add price data to the result
                 for address in batch:
-                    token_info = {
-                        'metadata': metadata_dict.get(address, {}),
-                        'price_volume_data': price_volume_dict.get(address, {})
-                    }
-                    token_data[address] = token_info
+                    price_info = price_volume_dict.get(address, {})
+                    price_data[address] = price_info
 
-                logger.info(f"Successfully fetched data for batch {idx}")
+                logger.info(f"Successfully fetched price data for batch {idx}")
             except Exception as e:
-                logger.error(f"Error fetching data for batch {idx}: {str(e)}", exc_info=True)
+                logger.error(f"Error fetching price data for batch {idx}: {str(e)}", exc_info=True)
                 # Optionally, implement retries or continue to the next batch
 
-        logger.info(f"Compiled token data for {len(token_data)} tokens.")
-        return token_data
+        logger.info(f"Compiled price data for {len(price_data)} tokens.")
+        return price_data
 
     except Exception as e:
-        logger.error(f"Error fetching token data: {str(e)}", exc_info=True)
+        logger.error(f"Error fetching price data: {str(e)}", exc_info=True)
         return {}

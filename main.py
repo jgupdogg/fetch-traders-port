@@ -1,5 +1,3 @@
-# main.py
-
 import os
 import json
 import logging
@@ -13,11 +11,12 @@ from utils.snowflake import (
     get_addresses,
     get_top_addresses_by_frequency,
     get_trader_details,
-    create_snowflake_session
+    create_snowflake_session,
+    get_token_data_from_snowflake  # Added this function
 )
 from utils.birdseye import (
     initialize_birdseye_sdk,
-    get_token_data
+    get_price_data  # Modified function
 )
 
 # Configure logging
@@ -99,7 +98,6 @@ def lambda_handler(event, context):
             }
 
         # Extract 'addresses' from the payload (if any)
-        # Renamed from 'address' to 'addresses' for clarity
         addresses = payload.get('addresses', [])
         if addresses and not isinstance(addresses, list):
             logger.warning("'addresses' should be a list.")
@@ -178,14 +176,20 @@ def lambda_handler(event, context):
                 if 'TOKEN_ADDRESS' in item and item['TOKEN_ADDRESS']:
                     token_addresses.add(item['TOKEN_ADDRESS'])
 
-            # If token addresses are available from other sources, add them here
-            # Currently, data3 does not provide 'TOKEN_ADDRESSES', so we skip it
-
             token_addresses = list(token_addresses)
             logger.info(f"Total token addresses collected: {len(token_addresses)}")
 
-            # Use the SDK to fetch token metadata and trade data
-            token_data = get_token_data(birdseye_sdk, token_addresses)
+            # Fetch token data from Snowflake
+            token_data = get_token_data_from_snowflake(session, token_addresses)
+
+            # Fetch price data from BirdsEyeSDK
+            price_data = get_price_data(birdseye_sdk, token_addresses)
+
+            # Merge price data into token_data
+            for address in token_data:
+                token_data[address]['price_data'] = price_data.get(address, {})
+
+            # Set the token_data in the response_data
             response_data['token_data'] = token_data
 
             # Close the session

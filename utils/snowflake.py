@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import col
+from typing import List, Dict, Any
 
 # Use the root logger
 logger = logging.getLogger()
@@ -195,4 +196,56 @@ def get_trader_details(session: Session, addresses: list) -> list:
         return data
     except Exception as e:
         logger.error(f"Error fetching trader details: {str(e)}", exc_info=True)
+        raise
+
+
+def get_token_data_from_snowflake(session: Session, token_addresses: List[str]) -> Dict[str, Any]:
+    """
+    Fetches token data from the TOKEN_DATA table for the given token addresses.
+    Returns a dictionary mapping token addresses to their respective data.
+    """
+    try:
+        if not token_addresses:
+            logger.info("No token addresses provided for fetching token data.")
+            return {}
+        logger.info(f"Fetching token data for addresses: {token_addresses}")
+
+        # Use Snowpark's DataFrame API to prevent SQL injection
+        df = session.table('TOKEN_DATA').filter(col('TOKEN_ADDRESS').isin(token_addresses))
+        result = df.collect()
+
+        # Prepare data
+        token_data = {}
+        for row in result:
+            token_address = row['TOKEN_ADDRESS']
+            item = {
+                'TOKEN_ADDRESS': token_address,
+                'SYMBOL': row['SYMBOL'],
+                'DECIMALS': row['DECIMALS'],
+                'NAME': row['NAME'],
+                'WEBSITE': row['WEBSITE'],
+                'TWITTER': row['TWITTER'],
+                'DESCRIPTION': row['DESCRIPTION'],
+                'LOGO_URI': row['LOGO_URI'],
+                'LIQUIDITY': row['LIQUIDITY'],
+                'MARKET_CAP': row['MARKET_CAP'],
+                'HOLDER_COUNT': row['HOLDER_COUNT'],
+                'PRICE': row['PRICE'],
+                'V24H_USD': row['V24H_USD'],
+                'V_BUY_HISTORY_24H_USD': row['V_BUY_HISTORY_24H_USD'],
+                'V_SELL_HISTORY_24H_USD': row['V_SELL_HISTORY_24H_USD'],
+                'CREATION_TIMESTAMP': row['CREATION_TIMESTAMP'].isoformat() if isinstance(row['CREATION_TIMESTAMP'], datetime) else row['CREATION_TIMESTAMP'],
+                'OWNER': row['OWNER'],
+                'TOP10_HOLDER_PERCENT': row['TOP10_HOLDER_PERCENT'],
+                'OWNER_PERCENTAGE': row['OWNER_PERCENTAGE'],
+                'CREATOR_PERCENTAGE': row['CREATOR_PERCENTAGE'],
+                'LAST_UPDATED': row['LAST_UPDATED'].isoformat() if isinstance(row['LAST_UPDATED'], datetime) else row['LAST_UPDATED'],
+                'DATE_ADDED': row['DATE_ADDED'].isoformat() if isinstance(row['DATE_ADDED'], datetime) else row['DATE_ADDED'],
+            }
+            token_data[token_address] = item
+
+        logger.info(f"Retrieved token data for {len(token_data)} tokens.")
+        return token_data
+    except Exception as e:
+        logger.error(f"Error fetching token data from Snowflake: {str(e)}", exc_info=True)
         raise
