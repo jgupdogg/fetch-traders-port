@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import base64
+from typing import List, Dict, Any
 from snowflake.snowpark import Session
 
 # Import utility functions
@@ -12,11 +13,11 @@ from utils.snowflake import (
     get_top_addresses_by_frequency,
     get_trader_details,
     create_snowflake_session,
-    get_token_data_from_snowflake  # Added this function
+    get_token_data_from_snowflake
 )
 from utils.birdseye import (
     initialize_birdseye_sdk,
-    get_price_data  # Modified function
+    get_price_data
 )
 
 # Configure logging
@@ -174,7 +175,7 @@ def lambda_handler(event, context):
             # From data1
             for item in data1:
                 if 'TOKEN_ADDRESS' in item and item['TOKEN_ADDRESS']:
-                    token_addresses.add(item['TOKEN_ADDRESS'])
+                    token_addresses.add(item['TOKEN_ADDRESS'].strip())
 
             token_addresses = list(token_addresses)
             logger.info(f"Total token addresses collected: {len(token_addresses)}")
@@ -182,12 +183,20 @@ def lambda_handler(event, context):
             # Fetch token data from Snowflake
             token_data = get_token_data_from_snowflake(session, token_addresses)
 
+            # Get the list of token addresses from token_data for price fetching
+            token_addresses_for_price = [data['TOKEN_ADDRESS'] for data in token_data.values()]
+
             # Fetch price data from BirdsEyeSDK
-            price_data = get_price_data(birdseye_sdk, token_addresses)
+            price_data = get_price_data(birdseye_sdk, token_addresses_for_price)
 
             # Merge price data into token_data
-            for address in token_data:
-                token_data[address]['price_data'] = price_data.get(address, {})
+            for data in token_data.values():
+                token_address = data['TOKEN_ADDRESS']
+                price_info = price_data.get(token_address)
+                if price_info:
+                    data['price_data'] = price_info
+                else:
+                    logger.warning(f"No price data found for address: {token_address}")
 
             # Set the token_data in the response_data
             response_data['token_data'] = token_data

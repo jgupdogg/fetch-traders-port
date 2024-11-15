@@ -73,6 +73,9 @@ def get_price_data(sdk: BirdsEyeSDK, token_addresses: List[str]) -> dict:
                     price_data[address] = price_info
 
                 logger.info(f"Successfully fetched price data for batch {idx}")
+                # show the price data
+                logger.debug(f"Price data for batch {idx}: {price_data}")
+                
             except Exception as e:
                 logger.error(f"Error fetching price data for batch {idx}: {str(e)}", exc_info=True)
                 # Optionally, implement retries or continue to the next batch
