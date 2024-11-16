@@ -1,9 +1,13 @@
+# main.py
+
 import os
 import json
 import logging
 import base64
+import decimal  # Import decimal to handle Decimal types
 from typing import List, Dict, Any
 from snowflake.snowpark import Session
+from datetime import datetime  # Import datetime for serialization
 
 # Import utility functions
 from utils.snowflake import (
@@ -13,7 +17,8 @@ from utils.snowflake import (
     get_top_addresses_by_frequency,
     get_trader_details,
     create_snowflake_session,
-    get_token_data_from_snowflake
+    get_token_data_from_snowflake,
+    get_token_balance_changes  # Import the new utility function
 )
 from utils.birdseye import (
     initialize_birdseye_sdk,
@@ -34,7 +39,8 @@ logger.setLevel(logging.DEBUG)
 def lambda_handler(event, context):
     """
     AWS Lambda function handler to process API requests and return trader portfolio data,
-    along with token metadata and trade data. Includes proper CORS handling for browser-based requests.
+    along with token metadata, trade data, and token balance changes. Includes proper CORS handling
+    for browser-based requests.
     """
     try:
         # Log the event safely
@@ -74,7 +80,15 @@ def lambda_handler(event, context):
         body = event.get('body', '{}')
         is_base64_encoded = event.get('isBase64Encoded', False)
         if is_base64_encoded:
-            body = base64.b64decode(body).decode('utf-8')
+            try:
+                body = base64.b64decode(body).decode('utf-8')
+            except (base64.binascii.Error, UnicodeDecodeError) as e:
+                logger.error(f"Error decoding base64 body: {str(e)}")
+                return {
+                    'statusCode': 400,
+                    'headers': cors_headers,
+                    'body': json.dumps({'error': 'Invalid base64 encoding.'})
+                }
         logger.info(f"Raw body: {body}")
 
         try:
@@ -195,19 +209,36 @@ def lambda_handler(event, context):
                 price_info = price_data.get(token_address)
                 if price_info:
                     data['price_data'] = price_info
+                    logger.debug(f"Merged price data for token_address: {token_address}")
                 else:
                     logger.warning(f"No price data found for address: {token_address}")
 
             # Set the token_data in the response_data
             response_data['token_data'] = token_data
 
+            # **New Section: Get Token Balance Changes**
+            # Retrieve token balance changes between the latest two FETCH_DATE entries
+            balance_changes = get_token_balance_changes(session, category)
+            response_data['balance_changes'] = balance_changes
+            logger.info(f"Added balance_changes with {len(balance_changes)} records.")
+            # **End of New Section**
+
             # Close the session
             session.close()
+
+            # Ensure that the data is serializable
+            # Convert any datetime objects and Decimal objects to strings/floats
+            def serialize(obj):
+                if isinstance(obj, datetime):
+                    return obj.isoformat()
+                if isinstance(obj, decimal.Decimal):
+                    return float(obj)
+                raise TypeError(f"Type {type(obj)} not serializable")
 
             return {
                 'statusCode': 200,
                 'headers': cors_headers,
-                'body': json.dumps({'data': response_data})
+                'body': json.dumps({'data': response_data}, default=serialize)
             }
 
         except Exception as e:

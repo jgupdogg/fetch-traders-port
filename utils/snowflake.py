@@ -4,7 +4,7 @@ import os
 import logging
 from datetime import datetime
 from snowflake.snowpark import Session
-from snowflake.snowpark.functions import col
+from snowflake.snowpark.functions import col, coalesce, when  # Removed nullif, added when
 from typing import List, Dict, Any
 
 # Use the root logger
@@ -109,9 +109,9 @@ def get_trader_portfolio_agg(session: Session, category: str, fetch_date: dateti
                 'TOKEN': row['TOKEN'],
                 'TOKEN_ADDRESS': row['TOKEN_ADDRESS'],
                 'CATEGORY': row['CATEGORY'],
-                'TOTAL_VALUE_USD': row['TOTAL_VALUE_USD'],
-                'TOTAL_BALANCE': row['TOTAL_BALANCE'],
-                'TRADER_COUNT': row['TRADER_COUNT'],
+                'TOTAL_VALUE_USD': float(row['TOTAL_VALUE_USD']) if row['TOTAL_VALUE_USD'] is not None else None,
+                'TOTAL_BALANCE': float(row['TOTAL_BALANCE']) if row['TOTAL_BALANCE'] is not None else None,
+                'TRADER_COUNT': int(row['TRADER_COUNT']) if row['TRADER_COUNT'] is not None else None,
                 'FETCH_DATE': row['FETCH_DATE'].isoformat() if isinstance(row['FETCH_DATE'], datetime) else row['FETCH_DATE']
             }
             data.append(item)
@@ -189,7 +189,7 @@ def get_trader_details(session: Session, addresses: list) -> list:
                 'DATE_ADDED': row['DATE_ADDED'].isoformat() if isinstance(row['DATE_ADDED'], datetime) else row['DATE_ADDED'],
                 'ADDRESS': row['ADDRESS'],
                 'CATEGORY': row['CATEGORY'],
-                'FREQ': row['FREQ']
+                'FREQ': int(row['FREQ']) if row['FREQ'] is not None else None
             }
             data.append(item)
         logger.info(f"Retrieved {len(data)} trader records.")
@@ -197,7 +197,6 @@ def get_trader_details(session: Session, addresses: list) -> list:
     except Exception as e:
         logger.error(f"Error fetching trader details: {str(e)}", exc_info=True)
         raise
-
 
 def get_token_data_from_snowflake(session: Session, token_addresses: List[str]) -> Dict[str, Any]:
     """
@@ -221,24 +220,24 @@ def get_token_data_from_snowflake(session: Session, token_addresses: List[str]) 
             item = {
                 'TOKEN_ADDRESS': token_address,
                 'SYMBOL': row['SYMBOL'],
-                'DECIMALS': row['DECIMALS'],
+                'DECIMALS': int(row['DECIMALS']) if row['DECIMALS'] is not None else None,
                 'NAME': row['NAME'],
                 'WEBSITE': row['WEBSITE'],
                 'TWITTER': row['TWITTER'],
                 'DESCRIPTION': row['DESCRIPTION'],
                 'LOGO_URI': row['LOGO_URI'],
-                'LIQUIDITY': row['LIQUIDITY'],
-                'MARKET_CAP': row['MARKET_CAP'],
-                'HOLDER_COUNT': row['HOLDER_COUNT'],
-                'PRICE': row['PRICE'],
-                'V24H_USD': row['V24H_USD'],
-                'V_BUY_HISTORY_24H_USD': row['V_BUY_HISTORY_24H_USD'],
-                'V_SELL_HISTORY_24H_USD': row['V_SELL_HISTORY_24H_USD'],
+                'LIQUIDITY': float(row['LIQUIDITY']) if row['LIQUIDITY'] is not None else None,
+                'MARKET_CAP': float(row['MARKET_CAP']) if row['MARKET_CAP'] is not None else None,
+                'HOLDER_COUNT': int(row['HOLDER_COUNT']) if row['HOLDER_COUNT'] is not None else None,
+                'PRICE': float(row['PRICE']) if row['PRICE'] is not None else None,
+                'V24H_USD': float(row['V24H_USD']) if row['V24H_USD'] is not None else None,
+                'V_BUY_HISTORY_24H_USD': float(row['V_BUY_HISTORY_24H_USD']) if row['V_BUY_HISTORY_24H_USD'] is not None else None,
+                'V_SELL_HISTORY_24H_USD': float(row['V_SELL_HISTORY_24H_USD']) if row['V_SELL_HISTORY_24H_USD'] is not None else None,
                 'CREATION_TIMESTAMP': row['CREATION_TIMESTAMP'].isoformat() if isinstance(row['CREATION_TIMESTAMP'], datetime) else row['CREATION_TIMESTAMP'],
                 'OWNER': row['OWNER'],
-                'TOP10_HOLDER_PERCENT': row['TOP10_HOLDER_PERCENT'],
-                'OWNER_PERCENTAGE': row['OWNER_PERCENTAGE'],
-                'CREATOR_PERCENTAGE': row['CREATOR_PERCENTAGE'],
+                'TOP10_HOLDER_PERCENT': float(row['TOP10_HOLDER_PERCENT']) if row['TOP10_HOLDER_PERCENT'] is not None else None,
+                'OWNER_PERCENTAGE': float(row['OWNER_PERCENTAGE']) if row['OWNER_PERCENTAGE'] is not None else None,
+                'CREATOR_PERCENTAGE': float(row['CREATOR_PERCENTAGE']) if row['CREATOR_PERCENTAGE'] is not None else None,
                 'LAST_UPDATED': row['LAST_UPDATED'].isoformat() if isinstance(row['LAST_UPDATED'], datetime) else row['LAST_UPDATED'],
                 'DATE_ADDED': row['DATE_ADDED'].isoformat() if isinstance(row['DATE_ADDED'], datetime) else row['DATE_ADDED'],
             }
@@ -248,4 +247,86 @@ def get_token_data_from_snowflake(session: Session, token_addresses: List[str]) 
         return token_data
     except Exception as e:
         logger.error(f"Error fetching token data from Snowflake: {str(e)}", exc_info=True)
+        raise
+
+def get_token_balance_changes(session: Session, category: str) -> List[Dict[str, Any]]:
+    """
+    Retrieves token balance changes between the latest two FETCH_DATE entries for the given category.
+    """
+    try:
+        # Define the SQL query with parameterized category
+        query = f"""
+        WITH latest_dates AS (
+            SELECT DISTINCT FETCH_DATE
+            FROM TRADER_PORTFOLIO_AGG
+            WHERE CATEGORY = '{category}'
+            ORDER BY FETCH_DATE DESC
+            LIMIT 2
+        ),
+        data AS (
+            SELECT *
+            FROM TRADER_PORTFOLIO_AGG
+            WHERE FETCH_DATE IN (SELECT FETCH_DATE FROM latest_dates)
+              AND CATEGORY = '{category}'
+        ),
+        latest_data AS (
+            SELECT *
+            FROM data
+            WHERE FETCH_DATE = (SELECT MAX(FETCH_DATE) FROM latest_dates)
+        ),
+        previous_data AS (
+            SELECT *
+            FROM data
+            WHERE FETCH_DATE = (SELECT MIN(FETCH_DATE) FROM latest_dates)
+        ),
+        comparison AS (
+            SELECT
+                COALESCE(l.TOKEN_ADDRESS, p.TOKEN_ADDRESS) AS TOKEN_ADDRESS,
+                COALESCE(l.CATEGORY, p.CATEGORY) AS CATEGORY,
+                COALESCE(l.TOKEN_SYMBOL, p.TOKEN_SYMBOL) AS TOKEN_SYMBOL,
+                l.TOTAL_BALANCE AS LATEST_TOTAL_BALANCE,
+                p.TOTAL_BALANCE AS PREV_TOTAL_BALANCE,
+                l.TOTAL_VALUE_USD AS LATEST_TOTAL_VALUE_USD,
+                p.TOTAL_VALUE_USD AS PREV_TOTAL_VALUE_USD,
+                l.TRADER_COUNT AS LATEST_TRADER_COUNT,
+                p.TRADER_COUNT AS PREV_TRADER_COUNT,
+                (l.TOTAL_BALANCE - p.TOTAL_BALANCE) AS BALANCE_CHANGE,
+                (l.TOTAL_BALANCE - p.TOTAL_BALANCE) / NULLIF(p.TOTAL_BALANCE, 0) * 100 AS PERCENT_CHANGE,
+                (l.TRADER_COUNT - p.TRADER_COUNT) AS TRADER_COUNT_CHANGE,
+                (l.TRADER_COUNT - p.TRADER_COUNT) / NULLIF(p.TRADER_COUNT, 0) * 100 AS TRADER_COUNT_PERCENT_CHANGE
+            FROM latest_data l
+            FULL OUTER JOIN previous_data p
+                ON l.TOKEN_ADDRESS = p.TOKEN_ADDRESS AND l.CATEGORY = p.CATEGORY
+        )
+        SELECT *
+        FROM comparison
+        """
+        logger.info(f"Executing SQL query to fetch token balance changes for category '{category}'.")
+        
+        # Execute the query and collect the results
+        result = session.sql(query).collect()
+        
+        # Prepare data
+        data = []
+        for row in result:
+            item = {
+                'TOKEN_ADDRESS': row['TOKEN_ADDRESS'],
+                'CATEGORY': row['CATEGORY'],
+                'TOKEN_SYMBOL': row['TOKEN_SYMBOL'],
+                'LATEST_TOTAL_BALANCE': float(row['LATEST_TOTAL_BALANCE']) if row['LATEST_TOTAL_BALANCE'] is not None else None,
+                'PREV_TOTAL_BALANCE': float(row['PREV_TOTAL_BALANCE']) if row['PREV_TOTAL_BALANCE'] is not None else None,
+                'LATEST_TOTAL_VALUE_USD': float(row['LATEST_TOTAL_VALUE_USD']) if row['LATEST_TOTAL_VALUE_USD'] is not None else None,
+                'PREV_TOTAL_VALUE_USD': float(row['PREV_TOTAL_VALUE_USD']) if row['PREV_TOTAL_VALUE_USD'] is not None else None,
+                'LATEST_TRADER_COUNT': int(row['LATEST_TRADER_COUNT']) if row['LATEST_TRADER_COUNT'] is not None else None,
+                'PREV_TRADER_COUNT': int(row['PREV_TRADER_COUNT']) if row['PREV_TRADER_COUNT'] is not None else None,
+                'BALANCE_CHANGE': float(row['BALANCE_CHANGE']) if row['BALANCE_CHANGE'] is not None else None,
+                'PERCENT_CHANGE': float(row['PERCENT_CHANGE']) if row['PERCENT_CHANGE'] is not None else None,
+                'TRADER_COUNT_CHANGE': int(row['TRADER_COUNT_CHANGE']) if row['TRADER_COUNT_CHANGE'] is not None else None,
+                'TRADER_COUNT_PERCENT_CHANGE': float(row['TRADER_COUNT_PERCENT_CHANGE']) if row['TRADER_COUNT_PERCENT_CHANGE'] is not None else None
+            }
+            data.append(item)
+        logger.info(f"Retrieved {len(data)} token balance change records for category '{category}'.")
+        return data
+    except Exception as e:
+        logger.error(f"Error fetching token balance changes: {str(e)}", exc_info=True)
         raise

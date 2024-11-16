@@ -52,8 +52,8 @@ def get_price_data(sdk: BirdsEyeSDK, token_addresses: List[str]) -> dict:
         unique_addresses = list(set(address.strip() for address in token_addresses if address.strip()))
         logger.info(f"Total unique token addresses to fetch: {len(unique_addresses)}")
 
-        # Batch addresses into groups of 100
-        address_batches = batch_addresses(unique_addresses, batch_size=100)
+        # Batch addresses into groups of 50
+        address_batches = batch_addresses(unique_addresses, batch_size=50)
         logger.info(f"Total batches to process: {len(address_batches)}")
 
         for idx, batch in enumerate(address_batches, start=1):
@@ -69,13 +69,13 @@ def get_price_data(sdk: BirdsEyeSDK, token_addresses: List[str]) -> dict:
 
                 # Add price data to the result
                 for address in batch:
-                    price_info = price_volume_dict.get(address, {})
-                    price_data[address] = price_info
+                    price_info = price_volume_dict.get(address)
+                    if price_info:
+                        price_data[address] = price_info
+                    else:
+                        logger.warning(f"No price data returned for address: {address}")
 
                 logger.info(f"Successfully fetched price data for batch {idx}")
-                # show the price data
-                logger.debug(f"Price data for batch {idx}: {price_data}")
-                
             except Exception as e:
                 logger.error(f"Error fetching price data for batch {idx}: {str(e)}", exc_info=True)
                 # Optionally, implement retries or continue to the next batch
