@@ -6,6 +6,7 @@ from datetime import datetime
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import col, coalesce, when  # Removed nullif, added when
 from typing import List, Dict, Any
+import pandas as pd
 
 # Use the root logger
 logger = logging.getLogger()
@@ -329,4 +330,55 @@ def get_token_balance_changes(session: Session, category: str) -> List[Dict[str,
         return data
     except Exception as e:
         logger.error(f"Error fetching token balance changes: {str(e)}", exc_info=True)
+        raise
+
+
+# utils/snowflake.py
+def get_trader_portfolio_agg(session: Session, category: str, max_fetch_date: datetime, time_intervals: List[int]) -> pd.DataFrame:
+    """
+    Retrieves rows from TRADER_PORTFOLIO_AGG for the specified category and time intervals.
+    Returns a DataFrame for further processing.
+    """
+    try:
+        # Define the time intervals in hours and their labels
+        time_labels = ['1h', '2h', '4h', '12h', '24h']
+        weights = {'1h': 0.4, '2h': 0.35, '4h': 0.2, '12h': 0.05, '24h': 0.0}
+        
+        # Prepare the time intervals in hours
+        interval_hours = ', '.join([str(h) for h in time_intervals])
+
+        # Construct the SQL query to fetch data within the time intervals
+        sql_query = f"""
+        WITH intervals AS (
+            SELECT '{max_fetch_date}'::timestamp_ltz AS max_date
+        ),
+        dates AS (
+            SELECT
+                max_date - INTERVAL '{time_intervals[0]} HOURS' AS target_date_{time_intervals[0]}
+                {''.join([f", max_date - INTERVAL '{h} HOURS' AS target_date_{h}" for h in time_intervals[1:]])}
+            FROM intervals
+        ),
+        data AS (
+            SELECT
+                t.FETCH_DATE,
+                t.TOKEN_SYMBOL,
+                t.TOKEN_ADDRESS,
+                t.CATEGORY,
+                t.TOTAL_VALUE_USD,
+                t.TOTAL_BALANCE,
+                t.TRADER_COUNT
+            FROM TRADER_PORTFOLIO_AGG t
+            JOIN dates d ON t.FETCH_DATE >= d.target_date_{max(time_intervals)}
+            WHERE t.CATEGORY = '{category}'
+        )
+        SELECT * FROM data
+        """
+        logger.info(f"Executing data retrieval query for category '{category}' and time intervals.")
+        
+        # Execute the query and collect the results into a Pandas DataFrame
+        df = session.sql(sql_query).to_pandas()
+        logger.info(f"Retrieved {len(df)} records for category '{category}'.")
+        return df
+    except Exception as e:
+        logger.error(f"Error fetching trader portfolio aggregation: {str(e)}", exc_info=True)
         raise

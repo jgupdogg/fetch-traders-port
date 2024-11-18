@@ -4,10 +4,12 @@ import os
 import json
 import logging
 import base64
-import decimal  # Import decimal to handle Decimal types
+import decimal
 from typing import List, Dict, Any
 from snowflake.snowpark import Session
-from datetime import datetime  # Import datetime for serialization
+from datetime import datetime, timedelta
+import pandas as pd
+import numpy as np
 
 # Import utility functions
 from utils.snowflake import (
@@ -18,7 +20,7 @@ from utils.snowflake import (
     get_trader_details,
     create_snowflake_session,
     get_token_data_from_snowflake,
-    get_token_balance_changes  # Import the new utility function
+    get_token_balance_changes  # Ensure this is imported if used
 )
 from utils.birdseye import (
     initialize_birdseye_sdk,
@@ -168,71 +170,253 @@ def lambda_handler(event, context):
                     'body': json.dumps({'data': {}})
                 }
 
-            # Get Data1: All rows from TRADER_PORTFOLIO_AGG for the most recent date and category
-            data1 = get_trader_portfolio_agg(session, category, max_fetch_date)
-            response_data['data1'] = data1
+            # Define time intervals in hours and their labels
+            time_intervals = [1, 2, 4, 12, 24]
+            time_labels = ['1h', '2h', '4h', '12h', '24h']
+            weights = {'1h': 0.4, '2h': 0.35, '4h': 0.2, '12h': 0.05, '24h': 0.0}
 
-            # Get Data2: List of trader addresses from TRADERS table for the category
-            data2 = get_addresses(session, category)
-            response_data['data2'] = data2
+            # Get Data1: All rows from TRADER_PORTFOLIO_AGG for the required time intervals
+            df = get_trader_portfolio_agg(session, category, max_fetch_date, time_intervals)
 
-            # Get Data3: Trader details for a set of addresses
-            # If 'addresses' provided in payload, use them. Else, get top 5 addresses based on frequency from TRADERS
-            if not addresses:
-                addresses = get_top_addresses_by_frequency(session, category, top_n=5)
-            data3 = get_trader_details(session, addresses)
-            response_data['data3'] = data3
+            # Ensure FETCH_DATE is in datetime format
+            df['FETCH_DATE'] = pd.to_datetime(df['FETCH_DATE'])
 
-            # Now, get the list of token addresses from data1
-            token_addresses = set()
+            # Prepare the scoring data
+            logger.info("Preparing data for scoring.")
 
-            # From data1
-            for item in data1:
-                if 'TOKEN_ADDRESS' in item and item['TOKEN_ADDRESS']:
-                    token_addresses.add(item['TOKEN_ADDRESS'].strip())
+            # -----------------------------
+            # 1. Data Preparation
+            # -----------------------------
 
-            token_addresses = list(token_addresses)
+            # Create a DataFrame with the most recent 'FETCH_DATE' for each token
+            most_recent_dates = df.groupby('TOKEN_SYMBOL')['FETCH_DATE'].max().reset_index()
+            most_recent_dates.rename(columns={'FETCH_DATE': 'MOST_RECENT_DATE'}, inplace=True)
+
+            # Prepare the time periods DataFrame
+            tokens = df['TOKEN_SYMBOL'].unique()
+            tokens_df = pd.DataFrame({'TOKEN_SYMBOL': tokens})
+
+            # Create all combinations of tokens and time periods
+            tokens_periods = tokens_df.assign(key=1).merge(
+                pd.DataFrame({'TIME_DELTA': [timedelta(hours=h) for h in time_intervals], 'PERIOD_LABEL': time_labels, 'key': 1}),
+                on='key'
+            ).drop('key', axis=1)
+
+            # Merge most recent dates
+            tokens_periods = tokens_periods.merge(most_recent_dates, on='TOKEN_SYMBOL', how='left')
+
+            # Calculate target dates for each token and time period
+            tokens_periods['TARGET_DATE'] = tokens_periods['MOST_RECENT_DATE'] - tokens_periods['TIME_DELTA']
+
+            # Drop tokens where TARGET_DATE is before the earliest FETCH_DATE for that token
+            df_min_dates = df.groupby('TOKEN_SYMBOL')['FETCH_DATE'].min().reset_index()
+            df_min_dates.rename(columns={'FETCH_DATE': 'MIN_FETCH_DATE'}, inplace=True)
+            tokens_periods = tokens_periods.merge(df_min_dates, on='TOKEN_SYMBOL', how='left')
+            tokens_periods = tokens_periods[tokens_periods['TARGET_DATE'] >= tokens_periods['MIN_FETCH_DATE']]
+
+            # Ensure no NaN values in merge keys
+            assert tokens_periods['TOKEN_SYMBOL'].isnull().sum() == 0, "tokens_periods has NaN in 'TOKEN_SYMBOL'."
+            assert tokens_periods['TARGET_DATE'].isnull().sum() == 0, "tokens_periods has NaN in 'TARGET_DATE'."
+            assert df['TOKEN_SYMBOL'].isnull().sum() == 0, "df has NaN in 'TOKEN_SYMBOL'."
+            assert df['FETCH_DATE'].isnull().sum() == 0, "df has NaN in 'FETCH_DATE'."
+
+            # Sort tokens_periods and df
+            tokens_periods.sort_values(['TARGET_DATE', 'TOKEN_SYMBOL'], ascending=[True, True], inplace=True)
+            df.sort_values(['FETCH_DATE', 'TOKEN_SYMBOL'], ascending=[True, True], inplace=True)
+
+            # Verify 'TARGET_DATE' is monotonically increasing within each 'TOKEN_SYMBOL'
+            tokens_periods['is_increasing'] = tokens_periods.groupby('TOKEN_SYMBOL')['TARGET_DATE'].apply(lambda x: x.is_monotonic_increasing)
+            assert tokens_periods['is_increasing'].all(), "TARGET_DATE is not monotonically increasing within TOKEN_SYMBOL."
+
+            # -----------------------------
+            # 2. Merge As-Of to Get Historical Data
+            # -----------------------------
+
+            # Use 'merge_asof' to find the closest historical data point for each target date
+            merged = pd.merge_asof(
+                tokens_periods,
+                df,
+                left_on='TARGET_DATE',
+                right_on='FETCH_DATE',
+                by='TOKEN_SYMBOL',
+                direction='backward',
+                suffixes=('', '_PAST')
+            )
+
+            # Rename columns from past data for clarity
+            merged = merged.rename(columns={
+                'FETCH_DATE': 'PAST_FETCH_DATE',
+                'TOTAL_BALANCE': 'PAST_TOTAL_BALANCE',
+                'TRADER_COUNT': 'PAST_TRADER_COUNT',
+                # Exclude USD value as it's irrelevant
+                # 'TOTAL_VALUE_USD': 'PAST_TOTAL_VALUE_USD',
+                # 'CATEGORY': 'CATEGORY_PAST',
+                # 'TOKEN_ADDRESS': 'TOKEN_ADDRESS_PAST'
+            })
+
+            # -----------------------------
+            # 3. Retrieve Current Data for Each Token
+            # -----------------------------
+
+            # Retrieve current data for each token
+            current_data = df.groupby('TOKEN_SYMBOL').last().reset_index()
+            current_data = current_data.rename(columns={
+                'TOTAL_BALANCE': 'CURRENT_TOTAL_BALANCE',
+                'TRADER_COUNT': 'CURRENT_TRADER_COUNT',
+                # 'TOTAL_VALUE_USD': 'CURRENT_TOTAL_VALUE_USD',
+                'FETCH_DATE': 'CURRENT_FETCH_DATE',
+                # 'CATEGORY': 'CURRENT_CATEGORY',
+                # 'TOKEN_ADDRESS': 'CURRENT_TOKEN_ADDRESS'
+            })
+
+            # Merge current data into 'merged'
+            merged = merged.merge(
+                current_data[['TOKEN_SYMBOL', 'CURRENT_TOTAL_BALANCE', 'CURRENT_TRADER_COUNT']],
+                on='TOKEN_SYMBOL',
+                how='left'
+            )
+
+            # -----------------------------
+            # 4. Calculate Percentage and Exponential Changes
+            # -----------------------------
+
+            # Calculate percentage change for balance
+            def compute_balance_pct_change(current, past):
+                if pd.isnull(past) or pd.isnull(current):
+                    return 0.0  # Treat NaN changes as no change
+                elif past == 0:
+                    if current > 0:
+                        return 100.0  # From 0 to positive value
+                    else:
+                        return 0.0  # No change
+                else:
+                    return ((current - past) / abs(past)) * 100
+
+            merged['BALANCE_PCT_CHANGE'] = merged.apply(
+                lambda row: compute_balance_pct_change(row['CURRENT_TOTAL_BALANCE'], row['PAST_TOTAL_BALANCE']),
+                axis=1
+            )
+
+            # Exponentially value trader count changes
+            def compute_trader_count_score(current, past):
+                if pd.isnull(past) or pd.isnull(current):
+                    return 0.0
+                elif current <= past:
+                    return 0.0  # Only value increases
+                else:
+                    # Exponentially value the trader count increases
+                    # Formula: 2^current_trader_count - 2^past_trader_count
+                    return (2 ** current) - (2 ** past)
+
+            merged['TRADER_COUNT_SCORE'] = merged.apply(
+                lambda row: compute_trader_count_score(row['CURRENT_TRADER_COUNT'], row['PAST_TRADER_COUNT']),
+                axis=1
+            )
+
+            # -----------------------------
+            # 5. Apply Weighting Mechanism
+            # -----------------------------
+
+            # Map the weights to each period
+            merged['TIME_WEIGHT'] = merged['PERIOD_LABEL'].map(weights)
+
+            # Define metric weights
+            balance_weight = 0.7
+            trader_count_weight = 0.3
+
+            # Compute the effective change
+            merged['EFFECTIVE_CHANGE'] = (balance_weight * merged['BALANCE_PCT_CHANGE']) + \
+                                          (trader_count_weight * merged['TRADER_COUNT_SCORE'])
+
+            # Multiply by time weight to get the weighted change
+            merged['WEIGHTED_CHANGE'] = merged['EFFECTIVE_CHANGE'] * merged['TIME_WEIGHT']
+
+            # -----------------------------
+            # 6. Compute Final Scores
+            # -----------------------------
+
+            # Sum the weighted changes for each token to compute the final score
+            token_scores = merged.groupby('TOKEN_SYMBOL').agg({
+                'WEIGHTED_CHANGE': 'sum',
+                'CURRENT_TOTAL_BALANCE': 'first',
+                'CURRENT_TRADER_COUNT': 'first'
+            }).reset_index()
+
+            # Sort tokens by their final scores in descending order
+            token_scores = token_scores.sort_values('WEIGHTED_CHANGE', ascending=False).reset_index(drop=True)
+
+            # Merge token addresses and categories back into token_scores
+            token_info = df[['TOKEN_SYMBOL', 'TOKEN_ADDRESS', 'CATEGORY']].drop_duplicates()
+            token_scores = token_scores.merge(token_info, on='TOKEN_SYMBOL', how='left')
+
+            # -----------------------------
+            # 7. Fetch and Merge Token Data
+            # -----------------------------
+
+            # Now, get the list of token addresses from token_scores
+            token_addresses = token_scores['TOKEN_ADDRESS'].unique().tolist()
             logger.info(f"Total token addresses collected: {len(token_addresses)}")
 
             # Fetch token data from Snowflake
             token_data = get_token_data_from_snowflake(session, token_addresses)
 
-            # Get the list of token addresses from token_data for price fetching
-            token_addresses_for_price = [data['TOKEN_ADDRESS'] for data in token_data.values()]
+            # Convert token_data to DataFrame
+            token_data_df = pd.DataFrame.from_dict(token_data, orient='index')
+
+            # Merge token_data into token_scores
+            final_data = token_scores.merge(token_data_df, left_on='TOKEN_ADDRESS', right_on='TOKEN_ADDRESS', how='left')
+
+            # -----------------------------
+            # 8. Fetch Price Data and Merge
+            # -----------------------------
 
             # Fetch price data from BirdsEyeSDK
-            price_data = get_price_data(birdseye_sdk, token_addresses_for_price)
+            price_data = get_price_data(birdseye_sdk, token_addresses)
 
-            # Merge price data into token_data
-            for data in token_data.values():
-                token_address = data['TOKEN_ADDRESS']
-                price_info = price_data.get(token_address)
-                if price_info:
-                    data['price_data'] = price_info
-                    logger.debug(f"Merged price data for token_address: {token_address}")
-                else:
-                    logger.warning(f"No price data found for address: {token_address}")
+            # Convert price_data to DataFrame
+            price_data_df = pd.DataFrame.from_dict(price_data, orient='index').reset_index().rename(columns={'index': 'TOKEN_ADDRESS'})
 
-            # Set the token_data in the response_data
-            response_data['token_data'] = token_data
+            # Merge price_data into final_data
+            final_data = final_data.merge(price_data_df, on='TOKEN_ADDRESS', how='left')
 
-            # **New Section: Get Token Balance Changes**
-            # Retrieve token balance changes between the latest two FETCH_DATE entries
-            balance_changes = get_token_balance_changes(session, category)
-            response_data['balance_changes'] = balance_changes
-            logger.info(f"Added balance_changes with {len(balance_changes)} records.")
-            # **End of New Section**
+            # -----------------------------
+            # 9. Prepare Response Data
+            # -----------------------------
+
+            # Convert final_data to a list of dictionaries for JSON serialization
+            data3 = final_data.to_dict(orient='records')
+
+            # Replace 'data3' with the new scoring results
+            response_data['data3'] = data3
+
+            # -----------------------------
+            # 10. Optional: Token Balance Changes
+            # -----------------------------
+
+            # If you still need to include token balance changes, ensure they are integrated appropriately
+            # balance_changes = get_token_balance_changes(session, category)
+            # response_data['balance_changes'] = balance_changes
+            # logger.info(f"Added balance_changes with {len(balance_changes)} records.")
+
+            # -----------------------------
+            # 11. Close the session
+            # -----------------------------
 
             # Close the session
             session.close()
 
-            # Ensure that the data is serializable
+            # -----------------------------
+            # 12. Ensure Data is Serializable
+            # -----------------------------
+
             # Convert any datetime objects and Decimal objects to strings/floats
             def serialize(obj):
-                if isinstance(obj, datetime):
+                if isinstance(obj, (datetime, pd.Timestamp, np.datetime64)):
                     return obj.isoformat()
-                if isinstance(obj, decimal.Decimal):
+                if isinstance(obj, (decimal.Decimal, np.float64, np.float32, float)):
                     return float(obj)
+                if pd.isnull(obj):
+                    return None
                 raise TypeError(f"Type {type(obj)} not serializable")
 
             return {
