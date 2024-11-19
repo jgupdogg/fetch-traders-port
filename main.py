@@ -313,6 +313,23 @@ def lambda_handler(event, context):
                 axis=1
             )
 
+            # Also calculate percentage change in trader count
+            def compute_trader_count_pct_change(current, past):
+                if pd.isnull(past) or pd.isnull(current):
+                    return 0.0
+                elif past == 0:
+                    if current > 0:
+                        return 100.0
+                    else:
+                        return 0.0
+                else:
+                    return ((current - past) / abs(past)) * 100
+
+            merged['TRADER_COUNT_PCT_CHANGE'] = merged.apply(
+                lambda row: compute_trader_count_pct_change(row['CURRENT_TRADER_COUNT'], row['PAST_TRADER_COUNT']),
+                axis=1
+            )
+
             # -----------------------------
             # 5. Apply Weighting Mechanism
             # -----------------------------
@@ -383,46 +400,49 @@ def lambda_handler(event, context):
             # 9. Prepare Response Data
             # -----------------------------
 
+            # Merge the per-interval metrics into a list for each token
+            per_token_metrics = merged.groupby('TOKEN_SYMBOL').apply(lambda x: x.to_dict(orient='records')).reset_index()
+            per_token_metrics.columns = ['TOKEN_SYMBOL', 'INTERVAL_METRICS']
+
+            # Merge interval metrics into final_data
+            final_data = final_data.merge(per_token_metrics, on='TOKEN_SYMBOL', how='left')
+
             # Convert final_data to a list of dictionaries for JSON serialization
             data3 = final_data.to_dict(orient='records')
 
             # Replace 'data3' with the new scoring results
-            response_data['data3'] = data3
+            response_data['data'] = data3
 
             # -----------------------------
-            # 10. Optional: Token Balance Changes
-            # -----------------------------
-
-            # If you still need to include token balance changes, ensure they are integrated appropriately
-            # balance_changes = get_token_balance_changes(session, category)
-            # response_data['balance_changes'] = balance_changes
-            # logger.info(f"Added balance_changes with {len(balance_changes)} records.")
-
-            # -----------------------------
-            # 11. Close the session
+            # 10. Close the session
             # -----------------------------
 
             # Close the session
             session.close()
 
             # -----------------------------
-            # 12. Ensure Data is Serializable
+            # 11. Ensure Data is Serializable
             # -----------------------------
 
             # Convert any datetime objects and Decimal objects to strings/floats
             def serialize(obj):
                 if isinstance(obj, (datetime, pd.Timestamp, np.datetime64)):
                     return obj.isoformat()
+                if isinstance(obj, (timedelta, pd.Timedelta)):
+                    return str(obj)
                 if isinstance(obj, (decimal.Decimal, np.float64, np.float32, float)):
                     return float(obj)
+                if isinstance(obj, np.integer):
+                    return int(obj)
                 if pd.isnull(obj):
                     return None
                 raise TypeError(f"Type {type(obj)} not serializable")
 
+
             return {
                 'statusCode': 200,
                 'headers': cors_headers,
-                'body': json.dumps({'data': response_data}, default=serialize)
+                'body': json.dumps(response_data, default=serialize)
             }
 
         except Exception as e:
